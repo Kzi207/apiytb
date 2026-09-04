@@ -5,9 +5,17 @@ import base64
 import asyncio
 import subprocess
 import tempfile
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from pathlib import Path
 from urllib.parse import urlparse
 from threading import Lock
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
@@ -15,17 +23,29 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 # ============================================================
-# CONFIG
+# CONFIG FROM ENV
 # ============================================================
-
-AUTHOR = "khanhduy"
 
 BASE_DIR = Path(__file__).resolve().parent
 
-COOKIE_FILE = BASE_DIR / "cookies_runtime.txt"
-OUTPUT_FILE = BASE_DIR / "output.json"
+AUTHOR = os.getenv(
+    "AUTHOR",
+    "khanhduy"
+)
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(
+    os.getenv(
+        "PORT",
+        "3000"
+    )
+)
+
+YT_TIMEOUT = int(
+    os.getenv(
+        "YT_TIMEOUT",
+        "120"
+    )
+)
 
 YOUTUBE_COOKIES_B64 = os.getenv(
     "YOUTUBE_COOKIES_B64",
@@ -42,29 +62,11 @@ YOUTUBE_PROXY = os.getenv(
     ""
 ).strip()
 
-YT_TIMEOUT = int(
-    os.getenv("YT_TIMEOUT", "120")
-)
+COOKIE_FILE = BASE_DIR / "cookies_runtime.txt"
+
+OUTPUT_FILE = BASE_DIR / "output.json"
 
 output_lock = Lock()
-
-
-# ============================================================
-# FASTAPI
-# ============================================================
-
-app = FastAPI(
-    title="YouTube Direct MP4 API",
-    version="2.0.0"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"]
-)
 
 
 # ============================================================
@@ -72,6 +74,11 @@ app.add_middleware(
 # ============================================================
 
 def create_cookie_file():
+    """
+    Decode cookie Base64 từ ENV:
+    YOUTUBE_COOKIES_B64
+    """
+
     cookie_b64 = os.getenv(
         "YOUTUBE_COOKIES_B64",
         ""
@@ -79,41 +86,48 @@ def create_cookie_file():
 
     if not cookie_b64:
         print(
-            "[COOKIE] YOUTUBE_COOKIES_B64 chưa được cấu hình"
+            "[COOKIE] Không có YOUTUBE_COOKIES_B64"
         )
+
         return False
 
     try:
-        # Xóa whitespace do copy ENV
+        # Xóa spaces / newline trong ENV
         cookie_b64 = "".join(
             cookie_b64.split()
         )
 
-        # Fix padding Base64 nếu cần
-        missing_padding = len(cookie_b64) % 4
+        # Fix padding base64
+        remainder = len(
+            cookie_b64
+        ) % 4
 
-        if missing_padding:
-            cookie_b64 += "=" * (
-                4 - missing_padding
+        if remainder:
+            cookie_b64 += (
+                "=" * (4 - remainder)
             )
 
-        cookie_bytes = base64.b64decode(
-            cookie_b64
+        cookie_bytes = (
+            base64.b64decode(
+                cookie_b64
+            )
         )
 
-        cookie_text = cookie_bytes.decode(
-            "utf-8",
-            errors="replace"
+        cookie_text = (
+            cookie_bytes.decode(
+                "utf-8",
+                errors="replace"
+            )
         )
 
-        # Render chạy Linux -> LF
+        # Chuẩn hóa newline Linux
         cookie_text = (
             cookie_text
             .replace("\r\n", "\n")
             .replace("\r", "\n")
         )
 
-        # Netscape cookie validation
+        # Check Netscape format
         if not (
             cookie_text.startswith(
                 "# Netscape HTTP Cookie File"
@@ -134,7 +148,9 @@ def create_cookie_file():
             encoding="utf-8",
             newline="\n"
         ) as f:
-            f.write(cookie_text)
+            f.write(
+                cookie_text
+            )
 
         try:
             os.chmod(
@@ -145,7 +161,7 @@ def create_cookie_file():
             pass
 
         print(
-            f"[COOKIE] READY - {len(cookie_text)} bytes"
+            f"[COOKIE] READY ({len(cookie_text)} bytes)"
         )
 
         return True
@@ -160,20 +176,26 @@ def create_cookie_file():
 
 
 # ============================================================
-# NODE CHECK
+# NODE VERSION
 # ============================================================
 
 def get_node_version():
     try:
         result = subprocess.run(
-            ["node", "-v"],
+            [
+                "node",
+                "-v"
+            ],
             capture_output=True,
             text=True,
             timeout=5
         )
 
         if result.returncode == 0:
-            return result.stdout.strip()
+            return (
+                result.stdout
+                .strip()
+            )
 
     except Exception:
         pass
@@ -188,13 +210,11 @@ def node_22_or_newer():
         return False
 
     try:
-        number = version.lower().replace(
-            "v",
-            ""
-        )
-
         major = int(
-            number.split(".")[0]
+            version
+            .lower()
+            .replace("v", "")
+            .split(".")[0]
         )
 
         return major >= 22
@@ -222,7 +242,10 @@ def get_ytdlp_version():
         )
 
         if result.returncode == 0:
-            return result.stdout.strip()
+            return (
+                result.stdout
+                .strip()
+            )
 
     except Exception:
         pass
@@ -231,26 +254,34 @@ def get_ytdlp_version():
 
 
 # ============================================================
-# REDACT SECRET
+# ERROR CLEANER
 # ============================================================
 
-def clean_error(text):
-    text = str(text or "Unknown error")
+def clean_error(
+    error,
+    limit=4000
+):
+    text = str(
+        error or "Unknown error"
+    )
 
-    # Không để proxy credential lọt vào API
     proxy = os.getenv(
         "YOUTUBE_PROXY",
         ""
     ).strip()
 
+    # Không leak user/pass proxy
     if proxy:
         text = text.replace(
             proxy,
             "***PROXY***"
         )
 
-    if len(text) > 4000:
-        text = text[:4000] + "..."
+    if len(text) > limit:
+        text = (
+            text[:limit]
+            + "..."
+        )
 
     return text
 
@@ -261,20 +292,23 @@ def clean_error(text):
 
 def save_output(data):
     """
-    Atomic write để nhiều request hạn chế làm hỏng output.json.
+    Lưu response cuối cùng vào output.json
     """
 
     with output_lock:
-        temp_file = None
+        temp_name = None
 
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
-                dir=str(BASE_DIR),
+                dir=str(
+                    BASE_DIR
+                ),
                 delete=False,
                 suffix=".json"
             ) as f:
+
                 json.dump(
                     data,
                     f,
@@ -282,10 +316,12 @@ def save_output(data):
                     indent=2
                 )
 
-                temp_file = f.name
+                temp_name = (
+                    f.name
+                )
 
             os.replace(
-                temp_file,
+                temp_name,
                 OUTPUT_FILE
             )
 
@@ -296,14 +332,14 @@ def save_output(data):
             )
 
             if (
-                temp_file
+                temp_name
                 and os.path.exists(
-                    temp_file
+                    temp_name
                 )
             ):
                 try:
                     os.remove(
-                        temp_file
+                        temp_name
                     )
                 except Exception:
                     pass
@@ -315,7 +351,9 @@ def save_output(data):
 
 def valid_youtube_url(url):
     try:
-        parsed = urlparse(url)
+        parsed = urlparse(
+            url
+        )
 
         if parsed.scheme not in (
             "http",
@@ -328,7 +366,7 @@ def valid_youtube_url(url):
             or ""
         ).lower()
 
-        allowed = {
+        allowed_hosts = {
             "youtube.com",
             "www.youtube.com",
             "m.youtube.com",
@@ -337,7 +375,9 @@ def valid_youtube_url(url):
             "www.youtu.be"
         }
 
-        return host in allowed
+        return (
+            host in allowed_hosts
+        )
 
     except Exception:
         return False
@@ -371,19 +411,21 @@ def build_command(video_url):
         "2"
     ]
 
-    # ========================================================
+    # =============================================
     # COOKIE
-    # ========================================================
+    # =============================================
 
     if COOKIE_FILE.exists():
         command.extend([
             "--cookies",
-            str(COOKIE_FILE)
+            str(
+                COOKIE_FILE
+            )
         ])
 
-    # ========================================================
+    # =============================================
     # USER AGENT
-    # ========================================================
+    # =============================================
 
     user_agent = os.getenv(
         "YOUTUBE_USER_AGENT",
@@ -396,9 +438,9 @@ def build_command(video_url):
             user_agent
         ])
 
-    # ========================================================
+    # =============================================
     # PROXY
-    # ========================================================
+    # =============================================
 
     proxy = os.getenv(
         "YOUTUBE_PROXY",
@@ -411,9 +453,9 @@ def build_command(video_url):
             proxy
         ])
 
-    # ========================================================
+    # =============================================
     # JS CHALLENGE
-    # ========================================================
+    # =============================================
 
     if node_22_or_newer():
         command.extend([
@@ -424,16 +466,15 @@ def build_command(video_url):
             "ejs:github"
         ])
 
-    # ========================================================
-    # CLIENT
-    # ========================================================
+    # =============================================
+    # YOUTUBE CLIENT
+    # =============================================
 
     command.extend([
         "--extractor-args",
         "youtube:player_client=default,web_embedded"
     ])
 
-    # URL LUÔN CUỐI CÙNG
     command.append(
         video_url
     )
@@ -446,7 +487,7 @@ def build_command(video_url):
 # ============================================================
 
 def run_ytdlp(video_url):
-    # Tạo lại cookie nếu server restart / file bị xóa
+    # Nếu file cookie mất
     if (
         not COOKIE_FILE.exists()
         and os.getenv(
@@ -461,10 +502,11 @@ def run_ytdlp(video_url):
 
     print("")
     print(
-        "========================================"
+        "===================================="
     )
+
     print(
-        "[YT-DLP]",
+        "[YT-DLP URL]",
         video_url
     )
 
@@ -500,7 +542,7 @@ def run_ytdlp(video_url):
     )
 
     print(
-        "========================================"
+        "===================================="
     )
 
     result = subprocess.run(
@@ -530,20 +572,9 @@ def run_ytdlp(video_url):
             result.stdout
         )
 
-    except json.JSONDecodeError as e:
-        print(
-            "[STDOUT]",
-            result.stdout[:1000]
-        )
-
-        print(
-            "[STDERR]",
-            result.stderr[:1000]
-        )
-
+    except json.JSONDecodeError:
         raise RuntimeError(
-            "Không đọc được JSON từ yt-dlp: "
-            + str(e)
+            "Không đọc được JSON từ yt-dlp"
         )
 
 
@@ -574,10 +605,14 @@ def find_itag_18(info):
 
 
 # ============================================================
-# FALLBACK PROGRESSIVE MP4
+# FALLBACK MP4
 # ============================================================
 
 def find_progressive_mp4(info):
+    """
+    MP4 có cả audio + video
+    """
+
     formats = info.get(
         "formats",
         []
@@ -604,14 +639,12 @@ def find_progressive_mp4(info):
             "acodec"
         )
 
-        # Phải có video
         if (
             not vcodec
             or vcodec == "none"
         ):
             continue
 
-        # Phải có audio
         if (
             not acodec
             or acodec == "none"
@@ -625,16 +658,12 @@ def find_progressive_mp4(info):
     if not valid:
         return None
 
-    # Ưu tiên resolution cao
     valid.sort(
         key=lambda x: (
-            x.get(
-                "height"
-            )
+            x.get("height")
             or 0,
-            x.get(
-                "tbr"
-            )
+
+            x.get("tbr")
             or 0
         ),
         reverse=True
@@ -644,7 +673,7 @@ def find_progressive_mp4(info):
 
 
 # ============================================================
-# OUTPUT JSON
+# BUILD RESPONSE JSON
 # ============================================================
 
 def build_output(
@@ -720,29 +749,32 @@ def build_output(
 
 
 # ============================================================
-# STARTUP
+# FASTAPI LIFESPAN
 # ============================================================
 
-@app.on_event(
-    "startup"
-)
-async def startup():
-    create_cookie_file()
-
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     print("")
     print(
-        "========================================"
+        "======================================"
     )
     print(
-        "      YouTube Direct MP4 API"
+        " YouTube Direct MP4 API"
     )
     print(
-        "========================================"
+        "======================================"
     )
+
+    create_cookie_file()
 
     print(
         "Author:",
         AUTHOR
+    )
+
+    print(
+        "Port:",
+        PORT
     )
 
     print(
@@ -765,22 +797,59 @@ async def startup():
 
     print(
         "User-Agent:",
-        "READY"
+        "YES"
         if YOUTUBE_USER_AGENT
-        else "NOT SET"
+        else "NO"
     )
 
     print(
         "Proxy:",
-        "READY"
+        "YES"
         if YOUTUBE_PROXY
         else "DIRECT"
     )
 
     print(
-        "========================================"
+        "======================================"
     )
     print("")
+
+    yield
+
+    # Xóa cookie runtime khi shutdown
+    try:
+        if COOKIE_FILE.exists():
+            COOKIE_FILE.unlink()
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# APP
+# ============================================================
+
+app = FastAPI(
+    title="YouTube Direct MP4 API",
+    version="3.0.0",
+    lifespan=lifespan
+)
+
+
+# ============================================================
+# CORS
+# ============================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=[
+        "GET",
+        "OPTIONS"
+    ],
+    allow_headers=["*"]
+)
 
 
 # ============================================================
@@ -879,6 +948,10 @@ async def youtube_api(
 ):
     url = url.strip()
 
+    # ============================================
+    # VALIDATE
+    # ============================================
+
     if not valid_youtube_url(
         url
     ):
@@ -901,7 +974,10 @@ async def youtube_api(
         )
 
     try:
-        # Chạy subprocess ngoài event loop
+        # ========================================
+        # YT-DLP
+        # ========================================
+
         info = await asyncio.to_thread(
             run_ytdlp,
             url
@@ -914,9 +990,9 @@ async def youtube_api(
             )
         )
 
-        # ============================================
+        # ========================================
         # ITAG 18
-        # ============================================
+        # ========================================
 
         video_format = (
             find_itag_18(
@@ -931,8 +1007,12 @@ async def youtube_api(
 
         else:
             print(
-                "[FORMAT] itag 18 không có, fallback..."
+                "[FORMAT] itag 18 unavailable"
             )
+
+            # ====================================
+            # FALLBACK
+            # ====================================
 
             video_format = (
                 find_progressive_mp4(
@@ -942,8 +1022,7 @@ async def youtube_api(
 
         if not video_format:
             raise RuntimeError(
-                "Không tìm thấy MP4 progressive "
-                "có cả video và audio"
+                "Không tìm thấy MP4 có cả video và audio"
             )
 
         print(
@@ -959,6 +1038,10 @@ async def youtube_api(
                 "height"
             )
         )
+
+        # ========================================
+        # OUTPUT
+        # ========================================
 
         output = build_output(
             info,
@@ -1013,3 +1096,17 @@ async def youtube_api(
             status_code=500,
             content=output
         )
+
+
+# ============================================================
+# RUN LOCAL / RENDER
+# ============================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=PORT
+    )
